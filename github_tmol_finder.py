@@ -5,6 +5,7 @@ Script para buscar repositórios no GitHub que contenham:
 - arquivos .yml com "transitions"
 """
 
+import json
 import requests
 import time
 import os
@@ -101,19 +102,44 @@ class GitHubRepoMiner:
             "per_page": 100
         }
         
-        response = requests.get(search_url, headers=self.headers, params=params)
+        max_retries = 3
+        for attempt in range(max_retries):
+            response = requests.get(search_url, headers=self.headers, params=params)
+            
+            if response.status_code == 200:
+                self.rate_limit_remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
+                data = response.json()
+                # Salvar a resposta em um arquivo JSON no diretório "output"
+                output_dir = "output"
+                os.makedirs(output_dir, exist_ok=True)  # Criar o diretório se não existir
+                output_filename = os.path.join(output_dir, f"{repo_full_name.replace('/', '_')}_{filename.replace('.', '_')}_search_results.json")
+                
+                with open(output_filename, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4)
+                
+                return data.get("items", [])
+            elif response.status_code == 403 and "rate limit exceeded" in response.text:
+                # Obter o tempo exato de reset do rate limit
+                reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
+                current_time = int(time.time())
+                wait_time = max(reset_time - current_time + 10, 60)  # Adiciona 10s de margem
+                
+                print(f"Limite de taxa excedido. Esperando {wait_time} segundos até o reset...")
+                print(f"Tempo de reset: {datetime.fromtimestamp(reset_time).strftime('%Y-%m-%d %H:%M:%S')}")
+                time.sleep(wait_time)
+                # Continua o loop para tentar novamente após a espera
+            else:
+                print(f"Erro na busca de arquivos {filename} em {repo_full_name}: {response.status_code}")
+                print(response.json())
+                if attempt < max_retries - 1:
+                    # Backoff exponencial: esperar cada vez mais entre as tentativas
+                    wait_time = (2 ** attempt) * 30
+                    print(f"Tentativa {attempt+1}/{max_retries} falhou. Esperando {wait_time}s antes de tentar novamente...")
+                    time.sleep(wait_time)
+                else:
+                    return []
         
-        if response.status_code != 200:
-            print(f"Erro na busca de arquivos {filename} em {repo_full_name}: {response.status_code}")
-            if response.status_code == 403 and "rate limit exceeded" in response.text:
-                print("Limite de taxa excedido. Esperando...")
-                time.sleep(60)
-            return []
-        
-        self.rate_limit_remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
-        data = response.json()
-        
-        return data.get("items", [])
+        return []
     
     def check_file_content_for_text(self, repo_full_name, file_path, search_text):
         """
@@ -273,6 +299,18 @@ class GitHubRepoMiner:
                                 "name": yml_file["name"],
                                 "path": file_path,
                                 "url": yml_file["html_url"]
+                            })
+                            found_relevant_content = True
+                    
+                    pyproject_files = self.search_specific_files_in_repo(repo_name, "pyproject.toml")
+                    for pyproject_file in pyproject_files:
+                        file_path = pyproject_file["path"]
+                        if self.check_file_content_for_text(repo_name, file_path, "transitions"):
+                            print(f"✓ Arquivo {file_path} contém 'transitions'!")
+                            repo_data["requirements_with_transitions"].append({
+                                "name": pyproject_file["name"],
+                                "path": file_path,
+                                "url": pyproject_file["html_url"]
                             })
                             found_relevant_content = True
                     
